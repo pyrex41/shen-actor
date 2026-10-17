@@ -1,0 +1,6 @@
+do: [a b c]
+let: [x y]
+args: [1 2 3]
+if: [true then]
+and: [false]
+or: [true]

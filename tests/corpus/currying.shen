@@ -1,0 +1,11 @@
+\\ Partial application of defined functions, lambdas and primitives.
+(define add3 X Y Z -> (+ X (+ Y Z)))
+(output "~A~%" (add3 1 2 3))
+(output "~A~%" (((add3 1) 2) 3))
+(output "~A~%" ((add3 1 2) 3))
+(output "~A~%" ((add3 1) 2 3))
+(output "~A~%" (map (+ 10) [1 2 3]))
+(output "~A~%" ((/. X Y (- X Y)) 10 3))
+(output "~A~%" (((/. X Y (- X Y)) 10) 3))
+(output "~A~%" ((fn add3) 4 5 6))
+(output "~A~%" (map (add3 1 1) [0 1]))

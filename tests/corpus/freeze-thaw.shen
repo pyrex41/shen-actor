@@ -1,0 +1,11 @@
+\\ freeze delays evaluation; thaw forces it each time.
+(set n 0)
+(define tick -> (do (set n (+ 1 (value n))) (value n)))
+(set f (freeze (tick)))
+(output "frozen: ~A~%" (value n))
+(output "thaw: ~A~%" (thaw (value f)))
+(output "thaw: ~A~%" (thaw (value f)))
+(output "n: ~A~%" (value n))
+(define lazy-if C T E -> (if C (thaw T) (thaw E)))
+(output "~A~%" (lazy-if true (freeze ok) (freeze (error "not forced"))))
+(output "~A~%" (thaw (freeze (thaw (freeze nested)))))

@@ -1,0 +1,12 @@
+\\ = compares structurally; numbers by value.
+(output "~A~%" (= 1 1.0))
+(output "~A~%" (= [1 [2 3]] [1 [2 3]]))
+(output "~A~%" (= "abc" "abc"))
+(output "~A~%" (= abc abc))
+(output "~A~%" (= abc "abc"))
+(output "~A~%" (= (@v 1 2 <>) (@v 1 2 <>)))
+(output "~A~%" (= (@v 1 2 <>) (@v 1 3 <>)))
+(output "~A~%" (= (@p a b) (@p a b)))
+(output "~A~%" (= [] []))
+(output "~A~%" (= true true))
+(output "~A~%" (= 0 false))

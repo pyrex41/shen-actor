@@ -1,0 +1,13 @@
+changing the arity of h may cause errors
+changing the arity of k may cause errors
+[one 1]
+[two 1]
+changing the arity of h may cause errors
+changing the arity of h may cause errors
+[h2 1 2]
+[h2 1 2]
+2
+changing the arity of k may cause errors
+zero
+changing the arity of k may cause errors
+[k1 5]

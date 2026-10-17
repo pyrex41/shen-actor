@@ -7,8 +7,8 @@ Compatibility, negative cases, and conformance.
   change, including pin bumps.
 - Semantic regression corpus (M0): Shen programs with expected results for
   evaluation order, currying, computed application, closures, freeze/thaw,
-  errors, equality, mutable values, and arity redefinition, run against each
-  backend candidate.
+  errors, equality, mutable values, arity redefinition and nested load, run
+  against each backend candidate. `make corpus`; see `corpus/README.md`.
 - Ownership probes (M0): cross-process access to vectors, dictionaries,
   globals, and eval; records what fails today before any store changes.
 - Negative checker fixtures (M3): endpoint reuse, aliasing through branches,

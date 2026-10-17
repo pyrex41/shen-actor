@@ -1,0 +1,9 @@
+(fn inner-f)
+true
+
+loaded
+(fn middle-f)
+
+true
+[inner [middle x]]
+[inner [middle y]]

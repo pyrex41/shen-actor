@@ -39,6 +39,11 @@ baseline: shen-erl
 	$(MAKE) -C $(SHEN_ERL_DIR) shen-tests
 	$(MAKE) -C $(SHEN_ERL_DIR) ct
 
+## Semantic regression corpus (plan M0 step 4).  SHEN=... selects a backend.
+.PHONY: corpus
+corpus: shen-erl
+	sh scripts/run-corpus.sh
+
 .PHONY: check-pins
 check-pins:
 	sh scripts/check-pins.sh
