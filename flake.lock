@@ -1,0 +1,50 @@
+{
+  "nodes": {
+    "nixpkgs": {
+      "locked": {
+        "lastModified": 1787631388,
+        "narHash": "sha256-vMiXptXarfSdJb1Gkc+FYVOAibuBRj7qxGa8z68q1Uw=",
+        "owner": "NixOS",
+        "repo": "nixpkgs",
+        "rev": "ac6b2166e7a9375683b8e98f860f273222337b16",
+        "type": "github"
+      },
+      "original": {
+        "owner": "NixOS",
+        "ref": "nixpkgs-unstable",
+        "repo": "nixpkgs",
+        "type": "github"
+      }
+    },
+    "root": {
+      "inputs": {
+        "nixpkgs": [
+          "shen-erl",
+          "nixpkgs"
+        ],
+        "shen-erl": "shen-erl"
+      }
+    },
+    "shen-erl": {
+      "inputs": {
+        "nixpkgs": "nixpkgs"
+      },
+      "locked": {
+        "lastModified": 1791742472,
+        "narHash": "sha256-InPmtIa5+J6rlIv4yAGiQhCEQjtMxdZVB+ZYonrRZiA=",
+        "ref": "refs/heads/master",
+        "rev": "ea5380a433d4d4281d4ea4dd88c0ade290028a6c",
+        "revCount": 89,
+        "type": "git",
+        "url": "https://github.com/pyrex41/shen-erl"
+      },
+      "original": {
+        "rev": "ea5380a433d4d4281d4ea4dd88c0ade290028a6c",
+        "type": "git",
+        "url": "https://github.com/pyrex41/shen-erl"
+      }
+    }
+  },
+  "root": "root",
+  "version": 7
+}

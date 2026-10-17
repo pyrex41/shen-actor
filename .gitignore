@@ -1,0 +1,9 @@
+/deps/
+/ebin/
+/bin/
+/_build/
+/test/logs/
+/tests/logs/
+/erl_crash.dump
+/result
+/.direnv/
