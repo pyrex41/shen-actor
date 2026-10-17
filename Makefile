@@ -34,9 +34,16 @@ shen-erl: $(SHEN_ERL_DIR)/Makefile
 	$(MAKE) -C $(SHEN_ERL_DIR)
 
 ## The compatibility gate (PRD section 5 and success criterion 7).
+## The kernel suite exits 0 even when tests fail; its printed counts are
+## checked instead.  KERNEL_TESTS changes only with a kernel bump.
+KERNEL_TESTS := 143
+KERNEL_LOG := tests/logs/kernel-suite.log
+
 .PHONY: baseline
 baseline: shen-erl
-	$(MAKE) -C $(SHEN_ERL_DIR) shen-tests
+	@mkdir -p tests/logs
+	$(MAKE) -C $(SHEN_ERL_DIR) shen-tests 2>&1 | tee $(KERNEL_LOG)
+	sh scripts/check-kernel-suite.sh $(KERNEL_LOG) $(KERNEL_TESTS)
 	$(MAKE) -C $(SHEN_ERL_DIR) ct
 
 ## Semantic regression corpus (plan M0 step 4).  SHEN=... selects a backend.
