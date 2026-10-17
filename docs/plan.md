@@ -140,8 +140,9 @@ decisions later milestones depend on.
    read a global, set a global, create a vector, write to a vector created by
    the owner, call `eval-kl`, define a function. Each probe records the
    observed outcome (works, `badarg`, wrong value). Expected from section 1:
-   reads work, every write and every compile fails. No store is changed in
-   this milestone.
+   reads work, every write and every compile fails. Observed: as expected,
+   except that `eval-kl` of a non-defun expression works from any process
+   (see `tests/BASELINE.md`). No store is changed in this milestone.
 4. Semantic regression corpus (`tests/corpus/`): Shen programs with expected
    output for evaluation order, currying, computed application, closures,
    freeze/thaw, error propagation, equality, mutable values, redefinition with
@@ -364,8 +365,8 @@ In order, each a small reviewable change:
 
 1. This change: skeleton, pin, flake, Makefile, README, PRD, ADR 0001, plan.
 2. CI workflow running `make baseline`, `make ct`, `check-pins.sh`;
-   `tests/BASELINE.md` with the numbers from section 9.
-3. Ownership probe suite asserting today's behavior.
+   `tests/BASELINE.md` with the numbers from section 9. (Done.)
+3. Ownership probe suite asserting today's behavior. (Done.)
 4. Semantic regression corpus and its runner.
 5. Resource probes (eval and vector growth) with numbers.
 6. ADR 0002 grammar draft with parsed reservation examples and the failure
