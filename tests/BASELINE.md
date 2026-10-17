@@ -25,6 +25,10 @@ Recorded 17 October 2026 from a clean `make` in a cloud container.
 | `make ct`: this repository (`ownership_SUITE`) | 13 ok, 0 failed |
 | `scripts/check-pins.sh` | pins agree |
 
+The kernel suite's runner exits 0 even when tests fail, so `make baseline`
+checks its printed counts (`scripts/check-kernel-suite.sh`, expecting
+exactly 143 passed and 0 failed).
+
 The kernel suite took 188 s in the bootstrap session and 65 s here; run time
 depends on the machine and is not a regression signal.
 
