@@ -19,3 +19,7 @@ Compatibility, negative cases, and conformance.
   cannot hide.
 
 Common Test suites in this directory run with `make ct`.
+
+Resource probes (M0): `make resource-probes N=...` measures module, atom,
+ETS and memory growth under repeated evaluation and allocation; results are
+in `BASELINE.md`. A measurement, not a pass/fail test, so not in CI.

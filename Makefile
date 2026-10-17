@@ -51,6 +51,19 @@ baseline: shen-erl
 corpus: shen-erl
 	sh scripts/run-corpus.sh
 
+## Resource probes (plan M0 step 5): growth after N evaluations and
+## allocations.  Prints CSV for tests/BASELINE.md.  Flags match shen-erl's
+## launcher so the atom and process limits are the ones programs run with.
+N ?= 1000
+PROBE_DIR := tests/logs/probes
+
+.PHONY: resource-probes
+resource-probes: shen-erl
+	@mkdir -p $(PROBE_DIR)
+	$(ERLC) -o $(PROBE_DIR) tests/probes/resource_probes.erl
+	erl -noshell +P 524288 +t 4194304 -pa $(abspath $(SHEN_ERL_DIR)/ebin) -pa $(abspath $(PROBE_DIR)) \
+	  -s resource_probes main $(N)
+
 .PHONY: check-pins
 check-pins:
 	sh scripts/check-pins.sh
