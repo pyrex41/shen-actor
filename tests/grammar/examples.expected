@@ -1,0 +1,12 @@
+(fn actor.read-file)
+
+../../examples/reservation/protocols.shen
+  [record item-request]
+  [protocol inventory-admission [[ready reserve]]]
+  [protocol reservation [[open commit cancel status [timeout lease]] [committed status] [cancelled status] [expired status]]]
+../../examples/reservation/inventory.shen
+  [actor inventory [inventory-admission reservation] [[inventory-admission ready reserve] [reservation open commit] [reservation open cancel] [reservation open status] [reservation committed status] [reservation cancelled status] [reservation expired status] [reservation open lease]] [stock-conserved]]
+../../examples/reservation/client.shen
+  [checked reservation-client [[inventory-admission client] [reservation client]] [buy commit-or-report reconcile-reserve]]
+../../examples/reservation/reuse-rejected.shen
+  [checked reuse-after-commit [[reservation client]] [commit-then-cancel]]

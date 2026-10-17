@@ -41,8 +41,9 @@ suite throughout.
 - The simulator and the live OTP adapter agree on normalized traces for
   recorded schedules within the modeled boundary.
 
-The syntax above is illustrative until the first frontend milestone freezes
-the grammar. See [docs/prd.md](docs/prd.md) for the full product requirements
+The syntax above is illustrative; the proposed grammar is
+[ADR 0002](docs/decisions/0002-surface-grammar.md), with runnable examples in
+[examples/reservation](examples/reservation). See [docs/prd.md](docs/prd.md) for the full product requirements
 and technical specification, and [docs/plan.md](docs/plan.md) for how it is
 being built.
 
@@ -80,9 +81,12 @@ With direnv, `direnv allow` opts in.
 
 ## Status
 
-Pre-M0. The repository holds the specification, the repository-boundary
-decision, the build skeleton, and the plan. Milestone gates and their exit
-evidence are in [docs/plan.md](docs/plan.md).
+M0 in progress. CI runs the compatibility gate, the semantic corpus, the
+ownership probes and the grammar examples; measured baseline numbers are in
+[tests/BASELINE.md](tests/BASELINE.md). The grammar and failure taxonomy are
+proposed in [ADR 0002](docs/decisions/0002-surface-grammar.md).
+`bin/shen-actor` exists with every subcommand stubbed. Milestone gates and
+their exit evidence are in [docs/plan.md](docs/plan.md).
 
 ## Decisions
 

@@ -64,6 +64,11 @@ resource-probes: shen-erl
 	erl -noshell +P 524288 +t 4194304 -pa $(abspath $(SHEN_ERL_DIR)/ebin) -pa $(abspath $(PROBE_DIR)) \
 	  -s resource_probes main $(N)
 
+## The ADR 0002 examples, read as the frontend reads them.
+.PHONY: examples
+examples: shen-erl
+	CORPUS=$(BASE_DIR)/tests/grammar sh scripts/run-corpus.sh
+
 .PHONY: check-pins
 check-pins:
 	sh scripts/check-pins.sh
