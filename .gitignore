@@ -6,4 +6,4 @@
 /erl_crash.dump
 /result
 /.direnv/
-/tests/*.beam
+/tests/**/*.beam

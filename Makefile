@@ -69,6 +69,36 @@ resource-probes: shen-erl
 examples: shen-erl
 	CORPUS=$(BASE_DIR)/tests/grammar sh scripts/run-corpus.sh
 
+## M1 backend spike: build the LFE candidate (a copy of the pinned tree,
+## kernel recompiled through backends/lfe), then run the corpus on it and
+## the actor skeleton on both candidates.  `make spike-kernel` adds the full
+## kernel suite on the candidate.  Needs LFE (the Nix shell provides it).
+LFE_TREE := deps/shen-erl-lfe
+SPIKE_EBIN := tests/logs/spike-ebin
+
+.PHONY: spike-build
+spike-build: shen-erl
+	DEST=$(BASE_DIR)/$(LFE_TREE) sh backends/lfe/build.sh
+
+.PHONY: spike
+spike: spike-build
+	SHEN=$(BASE_DIR)/$(LFE_TREE)/bin/shen-erl sh scripts/run-corpus.sh
+	@mkdir -p $(SPIKE_EBIN) tests/logs/spike
+	$(ERLC) -o $(SPIKE_EBIN) backends/skeleton/actor_skeleton.erl
+	@# The candidate tree's shen_erl_kl_codegen is the LFE shim; the original
+	@# is compiled unmodified under another module name to compare against.
+	sed 's/^-module(shen_erl_kl_codegen)\./-module(shen_kl_erlforms)./' \
+	  $(SHEN_ERL_DIR)/src/shen_erl_kl_codegen.erl > $(SPIKE_EBIN)/shen_kl_erlforms.erl
+	$(ERLC) -o $(SPIKE_EBIN) $(SPIKE_EBIN)/shen_kl_erlforms.erl
+	erl -noshell -pa $(abspath $(LFE_TREE)/ebin) -pa $(abspath $(SPIKE_EBIN)) -eval \
+	  'Result = ct:run_test([{dir,"$(abspath tests/spike)"},{logdir,"$(abspath tests/logs/spike)"}]), io:format("CT_RESULT=~p~n", [Result]), case Result of {_Ok,0,_Skipped} -> halt(0); _ -> halt(1) end.'
+
+.PHONY: spike-kernel
+spike-kernel: spike-build
+	@mkdir -p tests/logs
+	cd $(LFE_TREE) && SHEN_ERL_ROOTDIR=$(BASE_DIR)/$(LFE_TREE) bin/shen-erl --script scripts/run-shen-tests.shen 2>&1 | tee $(BASE_DIR)/tests/logs/lfe-kernel-suite.log
+	sh scripts/check-kernel-suite.sh tests/logs/lfe-kernel-suite.log $(KERNEL_TESTS)
+
 .PHONY: check-pins
 check-pins:
 	sh scripts/check-pins.sh

@@ -85,7 +85,9 @@ M0 in progress. CI runs the compatibility gate, the semantic corpus, the
 ownership probes and the grammar examples; measured baseline numbers are in
 [tests/BASELINE.md](tests/BASELINE.md). The grammar and failure taxonomy are
 proposed in [ADR 0002](docs/decisions/0002-surface-grammar.md).
-`bin/shen-actor` exists with every subcommand stubbed. Milestone gates and
+`bin/shen-actor` exists with every subcommand stubbed. The M1 backend spike
+is complete: [ADR 0003](docs/decisions/0003-backend.md) proposes keeping the
+Erlang forms emitter, with both candidates passing the full kernel suite. Milestone gates and
 their exit evidence are in [docs/plan.md](docs/plan.md).
 
 ## Decisions

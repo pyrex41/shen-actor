@@ -38,3 +38,23 @@ jobs:
             tests/logs
             deps/shen-erl/test/logs
           if-no-files-found: ignore
+
+  # M1 evidence for ADR 0003: the LFE candidate passes the kernel suite and
+  # corpus, and the actor skeleton gives the same trace on both emitters.
+  spike:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v31
+      - name: make spike
+        run: nix develop --command make spike
+      - name: make spike-kernel
+        run: nix develop --command make spike-kernel
+      - name: Upload test logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: spike-logs
+          path: tests/logs
+          if-no-files-found: ignore
