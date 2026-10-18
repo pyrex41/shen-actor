@@ -373,7 +373,8 @@ In order, each a small reviewable change:
    taxonomy; `bin/shen-actor` stub. (Done; ADR proposed, awaiting review.)
 7. Upstream PRs to shen-erl for U3 (compiler interface) and U1 (unnamed
    tables), opened once probes and corpus exist to review them against.
-8. M1 spike begins.
+   (Patches prepared; not yet opened upstream.)
+8. M1 spike begins. (Done: ADR 0003 proposed, keeps Erlang forms.)
 
 ## 9 Baseline reproduction record
 

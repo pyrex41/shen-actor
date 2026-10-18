@@ -1,0 +1,803 @@
+From 60ea68dd6d10b82b5f727102fce991a3762a0cbb Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Sun, 18 Oct 2026 01:04:16 +0000
+Subject: [PATCH] Add shen_erl_compiler_api, a public compiler and dispatch
+ interface
+
+Embedders (other backends, code generators, Erlang callers) had to use
+internal functions: shen_erl_kl_codegen:compile/1 registers a defun in
+the function store before compiling it, eval/1 always loads, and
+dispatch lives in shen_erl_kl_compiler:invoke/2.
+
+shen_erl_compiler_api splits compilation into steps with a documented,
+-spec'd contract:
+
+  parse_string/1, parse_file/1  KLambda source -> KL forms
+  forms/2                       KL forms -> Erlang abstract forms
+  compile/2                     KL forms -> BEAM binary
+  load/2                        load the binary, register its defuns
+  run_toplevel/1                run the module's non-defun forms
+  call/2, arity/1, lookup/1     runtime dispatch by name
+
+forms/2 and compile/2 load nothing and change no function binding.  To
+make that possible the code generator no longer needs a defun to be
+registered before it is compiled: the defuns of the forms being
+compiled are passed down in the compile environment and shadow the
+function store, with the same overridability rule as set_mfa.  eval/1
+now compiles that way and registers in the new codegen load/2, after
+loading the module; the generated code is the same as before.
+compile/1, compile/3 (used by the kernel build after load_defuns/2) and
+the stores are otherwise unchanged.
+
+Adds shen_erl_global_stores:is_overridable/1 and the
+shen_erl_compiler_api_SUITE Common Test suite.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01V3S3SEmxSj7HnbJJmxMhCJ
+---
+ src/shen_erl_compiler_api.erl        | 173 +++++++++++++++++
+ src/shen_erl_global_stores.erl       |  10 +
+ src/shen_erl_kl_codegen.erl          | 122 +++++++++---
+ src/shen_erl_kl_env.erl              |  21 ++-
+ test/default.spec                    |   3 +-
+ test/shen_erl_compiler_api_SUITE.erl | 268 +++++++++++++++++++++++++++
+ 6 files changed, 566 insertions(+), 31 deletions(-)
+ create mode 100644 src/shen_erl_compiler_api.erl
+ create mode 100644 test/shen_erl_compiler_api_SUITE.erl
+
+diff --git a/src/shen_erl_compiler_api.erl b/src/shen_erl_compiler_api.erl
+new file mode 100644
+index 0000000..bf3382a
+--- /dev/null
++++ b/src/shen_erl_compiler_api.erl
+@@ -0,0 +1,173 @@
++%%%-------------------------------------------------------------------
++%%% @doc Public interface to the KLambda compiler and runtime dispatch.
++%%%
++%%% For embedders: tools that read KLambda, generate code from it, or call
++%%% Shen functions from Erlang.  The other shen_erl_* modules are internal and
++%%% may change; this module's functions and specs are the stable contract.
++%%%
++%%% Compiling is split into steps with no side effects on the function store,
++%%% and one explicit step that has them:
++%%%
++%%% <pre>
++%%%   parse_string/1, parse_file/1   KLambda source -> KL forms
++%%%   forms/2                        KL forms -> Erlang abstract forms
++%%%   compile/2                      KL forms -> BEAM binary
++%%%   load/2                         load the binary, register its defuns
++%%%   run_toplevel/1                 run the non-defun forms (kl_tle/0)
++%%% </pre>
++%%%
++%%% A module compiled from KL exports one function per defun, with the defun's
++%%% name and arity, plus kl_tle/0.  kl_tle/0 evaluates the non-defun toplevel
++%%% forms in order and returns the last value, or `ok' when there are none.
++%%% If a name is defined more than once, the last definition is kept.
++%%%
++%%% Calls between the defuns of one module resolve to that module, exactly as
++%%% they will once load/2 registers them; calls to other functions resolve
++%%% through the function store at compile time.  A call to a function that
++%%% lives in a module whose name starts with `_kl_' (the modules
++%%% shen_erl_kl_codegen:eval/1 creates for evaluated defuns), or to a name
++%%% not yet defined, is dispatched at run time through call/2, so it follows
++%%% later redefinitions.  Calls to any other module are static remote calls:
++%%% name a module `_kl_...' to get late binding throughout.
++%%%
++%%% All functions need the stores created by shen_erl_global_stores:init/0
++%%% (their ETS tables belong to the process that called it).  forms/2 and
++%%% compile/2 read the function store and advance the generated-variable
++%%% counter, but do not change any function binding.  None of this updates
++%%% the kernel's own tables (the arity and lambda-form properties in
++%%% *property-vector*), so Shen's (arity F) and (fn F) do not see functions
++%%% registered only through load/2; with a booted kernel, call
++%%% `call('update-lambda-table', [Name, Arity])' for that.
++%%% @end
++%%%-------------------------------------------------------------------
++-module(shen_erl_compiler_api).
++
++%% Source
++-export([parse_string/1,
++         parse_file/1]).
++
++%% Compile and load
++-export([forms/2,
++         compile/2,
++         load/2,
++         run_toplevel/1]).
++
++%% Dispatch
++-export([call/2,
++         arity/1,
++         lookup/1]).
++
++-export_type([kl_form/0]).
++
++%% A KL toplevel form as produced by the parser: symbols are atoms, strings
++%% are {string, Chars}, lists are Erlang lists.
++-type kl_form() :: shen_erl_kl_parse:kl_tree().
++
++%%%===================================================================
++%%% Source
++%%%===================================================================
++
++%% @doc Parses KLambda source text into its toplevel forms.  A binary is
++%% decoded as UTF-8; string literals keep Unicode code points.
++-spec parse_string(unicode:chardata()) -> {ok, [kl_form()]} | {error, term()}.
++parse_string(Source) ->
++  case unicode:characters_to_list(Source) of
++    Chars when is_list(Chars) -> parse_chars(Chars);
++    _Invalid -> {error, invalid_unicode}
++  end.
++
++%% @doc Parses a KLambda source file into its toplevel forms.  The file is
++%% read as bytes, as the kernel build reads its .kl files, so non-ASCII
++%% characters in string literals appear as their UTF-8 bytes.
++-spec parse_file(file:filename()) -> {ok, [kl_form()]} | {error, term()}.
++parse_file(Filename) ->
++  case file:read_file(Filename) of
++    {ok, Bytes} -> parse_chars(binary_to_list(Bytes));
++    {error, Reason} -> {error, Reason}
++  end.
++
++%%%===================================================================
++%%% Compile and load
++%%%===================================================================
++
++%% @doc Compiles KL toplevel forms for module Mod into Erlang abstract
++%% forms (ready for compile:forms/2).  Nothing is loaded or registered.
++%% Returns `{error, {codegen, Reason}}' for KL the code generator does not
++%% accept.
++-spec forms(module(), [kl_form()]) ->
++        {ok, [erl_parse:abstract_form()]} | {error, {codegen, term()}}.
++forms(Mod, KlForms) when is_atom(Mod), is_list(KlForms) ->
++  try
++    {ok, shen_erl_kl_codegen:forms(Mod, KlForms, ok)}
++  catch
++    error:Reason -> {error, {codegen, Reason}}
++  end.
++
++%% @doc Compiles KL toplevel forms for module Mod into a BEAM binary.
++%% Nothing is loaded or registered.  Erlang compiler errors come back as
++%% `{error, {compile, Errors, Warnings}}' in the format of compile:forms/2.
++-spec compile(module(), [kl_form()]) ->
++        {ok, binary()} | {error, {codegen, term()} | {compile, list(), list()}}.
++compile(Mod, KlForms) ->
++  case forms(Mod, KlForms) of
++    {ok, Forms} ->
++      case compile:forms(Forms, [return_errors, return_warnings]) of
++        {ok, Mod, Bin, _Warnings} -> {ok, Bin};
++        {error, Errors, Warnings} -> {error, {compile, Errors, Warnings}}
++      end;
++    {error, Reason} ->
++      {error, Reason}
++  end.
++
++%% @doc Loads a binary produced by compile/2 and registers each of its
++%% defuns in the function store as {Mod, Name, Arity}, replacing earlier
++%% bindings (including other arities).  Names bound to the port's
++%% non-overridable functions keep their binding and are left out of the
++%% result.  Loading a module that is already loaded replaces its code.  Does
++%% not run the module's toplevel forms; see run_toplevel/1.
++-spec load(module(), binary()) -> {ok, [{atom(), arity()}]} | {error, term()}.
++load(Mod, Bin) when is_atom(Mod), is_binary(Bin) ->
++  shen_erl_kl_codegen:load(Mod, Bin).
++
++%% @doc Runs the non-defun toplevel forms of a loaded module and returns the
++%% last one's value (`ok' if there are none).
++-spec run_toplevel(module()) -> term().
++run_toplevel(Mod) ->
++  Mod:kl_tle().
++
++%%%===================================================================
++%%% Dispatch
++%%%===================================================================
++
++%% @doc Calls a Shen function by name through its current binding, with the
++%% semantics of a KL application: with fewer arguments than its arity the
++%% result is a curried closure taking one argument at a time; with more, the
++%% result is applied to the rest one at a time.  Raises error:{undef, Name}
++%% for an unbound name.
++-spec call(atom(), [term()]) -> term().
++call(Name, Args) when is_atom(Name), is_list(Args) ->
++  shen_erl_kl_compiler:invoke(Name, Args).
++
++%% @doc The arity call/2 uses for Name: that of its current binding.
++-spec arity(atom()) -> {ok, arity()} | not_found.
++arity(Name) ->
++  case lookup(Name) of
++    {ok, {_Mod, _Fun, Arity}} -> {ok, Arity};
++    not_found -> not_found
++  end.
++
++%% @doc The Erlang function currently bound to Name.
++-spec lookup(atom()) -> {ok, mfa()} | not_found.
++lookup(Name) when is_atom(Name) ->
++  shen_erl_global_stores:get_mfa(Name).
++
++%%%===================================================================
++%%% Internal functions
++%%%===================================================================
++
++parse_chars(Chars) ->
++  case shen_erl_kl_scan:string(Chars) of
++    {ok, [], _EndLine} -> {ok, []};
++    {ok, Tokens, _EndLine} -> shen_erl_kl_parse:parse_tree(Tokens);
++    {error, ErrorInfo, _ErrorLine} -> {error, ErrorInfo}
++  end.
+diff --git a/src/shen_erl_global_stores.erl b/src/shen_erl_global_stores.erl
+index 7fd36d8..81c6d5e 100644
+--- a/src/shen_erl_global_stores.erl
++++ b/src/shen_erl_global_stores.erl
+@@ -9,6 +9,7 @@
+          start_time/0,
+          get_mfa/1,
+          set_mfa/2,
++         is_overridable/1,
+          get_val/1,
+          set_val/2,
+          get_varname/0,
+@@ -75,6 +76,15 @@ set_mfa(FunName, MFA) ->
+   set_mfa(FunName, MFA, true),
+   ok.
+ 
++%% Whether set_mfa/2 would take effect for FunName: false only for the
++%% non-overridable port functions (shen_erl_kl_overrides).
++-spec is_overridable(atom()) -> boolean().
++is_overridable(FunName) ->
++  case lookup(?FUNCTIONS_STORE_NAME, FunName) of
++    {ok, {_MFA, false}} -> false;
++    _ -> true
++  end.
++
+ -spec get_val(atom()) -> {ok, term()} | not_found.
+ get_val(Key) ->
+   lookup(?VALUES_STORE_NAME, Key).
+diff --git a/src/shen_erl_kl_codegen.erl b/src/shen_erl_kl_codegen.erl
+index 3dfcd42..ea0b9cf 100644
+--- a/src/shen_erl_kl_codegen.erl
++++ b/src/shen_erl_kl_codegen.erl
+@@ -8,7 +8,9 @@
+ -export([load_defuns/2,
+          eval/1,
+          compile/1,
+-         compile/3]).
++         compile/3,
++         forms/3,
++         load/2]).
+ 
+ %% Macros
+ -define(ERL_TRUE, erl_syntax:atom(true)).
+@@ -19,7 +21,8 @@
+ 
+ -record(code, {signatures :: [form()],
+                forms :: [form()],
+-               tles :: [form()]}).
++               tles :: [form()],
++               funs = #{} :: #{atom() => mfa()}}).
+ 
+ %%%===================================================================
+ %%% API
+@@ -31,12 +34,46 @@ load_defuns(Mod, ToplevelDefs) ->
+     [defun, Name, Args, _Body] <- ToplevelDefs, is_atom(Name), is_list(Args)],
+   ok.
+ 
++%% Compiles, loads and runs one toplevel form.  A defun is compiled to module
++%% _kl_<Name>; anything else to a fresh module.  The defun is registered in
++%% the function store by load/2, after its module is loaded; while compiling,
++%% calls to it resolve as if it were already registered (see local_funs/2), so
++%% the generated code is the same as registering it first.
+ -spec eval(shen_erl_kl_parse:kl_tree()) -> term().
+ eval(ToplevelDef) ->
+-  {ok, Mod, Bin} = compile(ToplevelDef),
+-  {module, Mod} = code:load_binary(Mod, [], Bin),
++  {Mod, DefaultTle} = eval_target(ToplevelDef),
++  {ok, Mod, Bin} = compile_module(Mod, [ToplevelDef], DefaultTle,
++                                  local_funs(Mod, [ToplevelDef])),
++  {ok, _Registered} = load(Mod, Bin),
+   Mod:kl_tle().
+ 
++%% Abstract forms for module Mod, without compiling them to BEAM and without
++%% touching the function store.  Calls between the defuns in ToplevelDefs
++%% resolve to Mod, as they will once load/2 registers them.  kl_tle/0 runs the
++%% non-defun toplevel forms in order and returns the last one's value, or
++%% DefaultTle if there are none.
++-spec forms(module(), [shen_erl_kl_parse:kl_tree()], atom()) -> [erl_parse:abstract_form()].
++forms(Mod, ToplevelDefs, DefaultTle) ->
++  toplevel_forms(Mod, ToplevelDefs, DefaultTle, local_funs(Mod, ToplevelDefs)).
++
++%% Loads a module compiled from KL and registers its exported functions
++%% (other than kl_tle/0) in the function store.  Returns the registered
++%% functions; a name bound to a non-overridable port function is left alone.
++-spec load(module(), binary()) -> {ok, [{atom(), arity()}]} | {error, term()}.
++load(Mod, Bin) ->
++  case code:load_binary(Mod, [], Bin) of
++    {module, Mod} ->
++      Funs = [{Name, Arity} || {Name, Arity} <- Mod:module_info(exports),
++                               Name =/= kl_tle, Name =/= module_info,
++                               shen_erl_global_stores:is_overridable(Name)],
++      [shen_erl_global_stores:set_mfa(Name, {Mod, Name, Arity}) || {Name, Arity} <- Funs],
++      {ok, Funs};
++    {error, Reason} ->
++      {error, Reason}
++  end.
++
++%% Registers the defun before compiling it.  Kept for existing callers; eval/1
++%% no longer uses it.
+ -spec compile(shen_erl_kl_parse:kl_tree()) -> {ok, module(), binary()} |
+                                               {error, binary()}.
+ compile(ToplevelDef = [defun, Name, Args, _Body]) ->
+@@ -46,20 +83,49 @@ compile(ToplevelDef = [defun, Name, Args, _Body]) ->
+ compile(ToplevelDef) ->
+   compile(rand_modname(32, []), [ToplevelDef], ok).
+ 
++%% Compiles against the function store as it stands: the caller registers
++%% the defuns beforehand (shen_erl_kl_compiler:files_kl/2 uses load_defuns/2).
+ -spec compile(module(), shen_erl_kl_parse:kl_tree(), atom()) -> {ok, module(), binary()} |
+                                                                 {error, term()}.
+ compile(Mod, ToplevelDefs, DefaultTle) ->
+-  compile_toplevel(Mod, last_defuns(ToplevelDefs), #code{signatures = [],
+-                                            forms = [],
+-                                            tles = [erl_syntax:atom(DefaultTle)]}).
++  compile_module(Mod, ToplevelDefs, DefaultTle, #{}).
+ 
+ %%%===================================================================
+ %%% Internal functions
+ %%%===================================================================
+ 
++eval_target([defun, Name, _Args, _Body]) -> {modname(Name), Name};
++eval_target(_ToplevelDef) -> {rand_modname(32, []), ok}.
++
++%% What load/2 (or load_defuns/2) will register for the defuns in
++%% ToplevelDefs: the last definition of each name, unless the name is bound
++%% to a non-overridable port function.
++local_funs(Mod, ToplevelDefs) ->
++  maps:from_list([{Name, {Mod, Name, length(Args)}} ||
++                   [defun, Name, Args, _Body] <- ToplevelDefs,
++                   is_atom(Name), is_list(Args),
++                   shen_erl_global_stores:is_overridable(Name)]).
++
++compile_module(Mod, ToplevelDefs, DefaultTle, Funs) ->
++  Forms = toplevel_forms(Mod, ToplevelDefs, DefaultTle, Funs),
++  %% Returning warnings keeps runtime eval output clean; compiler diagnostics
++  %% must not leak into Shen program stdout/stderr (Bifrost treats both as the
++  %% observable launcher result).
++  case compile:forms(Forms, [return_errors, return_warnings]) of
++    {ok, Mod, Bin, _Warnings} -> {ok, Mod, Bin};
++    {error, Errors, Warnings} -> {error, {Errors, Warnings}}
++  end.
++
++toplevel_forms(Mod, ToplevelDefs, DefaultTle, Funs) ->
++  compile_toplevel(Mod, last_defuns(ToplevelDefs), #code{signatures = [],
++                                            forms = [],
++                                            tles = [erl_syntax:atom(DefaultTle)],
++                                            funs = Funs}).
++
+ compile_toplevel(Mod, [[defun, Name, Args, Body] | Rest], Code = #code{signatures = Sigs,
+-                                                                       forms = Forms}) ->
+-  Env = shen_erl_kl_env:new(),
++                                                                       forms = Forms,
++                                                                       funs = Funs}) ->
++  Env = shen_erl_kl_env:new(Funs),
+   UnusedVars = [Arg || Arg <- Args, is_unused(Arg, Body)],
+   {ArgsCode, Env2} = fun_vars(Args, Env, UnusedVars),
+   BodyCode = compile_exp(Body, Env2),
+@@ -70,8 +136,8 @@ compile_toplevel(Mod, [[defun, Name, Args, Body] | Rest], Code = #code{signature
+   Signature = erl_syntax:arity_qualifier(erl_syntax:atom(Name), erl_syntax:integer(length(Args))),
+   compile_toplevel(Mod, Rest, Code#code{signatures = [Signature | Sigs],
+                                         forms = [FunForm | Forms]});
+-compile_toplevel(Mod, [Exp | Rest], Code = #code{tles = Tles}) when is_list(Exp) ->
+-  Env = shen_erl_kl_env:new(),
++compile_toplevel(Mod, [Exp | Rest], Code = #code{tles = Tles, funs = Funs}) when is_list(Exp) ->
++  Env = shen_erl_kl_env:new(Funs),
+   BodyCode = compile_exp(Exp, Env),
+   compile_toplevel(Mod, Rest, Code#code{tles = [BodyCode | Tles]});
+ compile_toplevel(Mod, [_Exp | Rest], Code) ->
+@@ -89,14 +155,7 @@ compile_toplevel(Mod, [], #code{signatures = Sigs, forms = Forms, tles = Tles})
+   TleFunction = erl_syntax:function(erl_syntax:atom(kl_tle), [TleClause]),
+   TleForm = erl_syntax:revert(TleFunction),
+ 
+-  %% Returning warnings keeps runtime eval output clean; compiler diagnostics
+-  %% must not leak into Shen program stdout/stderr (Bifrost treats both as the
+-  %% observable launcher result).
+-  case compile:forms([ModForm, ExportForm, TleForm | Forms],
+-                     [return_errors, return_warnings]) of
+-    {ok, Mod, Bin, _Warnings} -> {ok, Mod, Bin};
+-    {error, Errors, Warnings} -> {error, {Errors, Warnings}}
+-  end.
++  [ModForm, ExportForm, TleForm | Forms].
+ 
+ %% A file may define the same function twice (ShenOSKernel 42.2's stlib.kl
+ %% defines min twice).  As when the file is loaded form by form, the last
+@@ -155,7 +214,7 @@ compile_exp({string, Exp}, _Env) ->
+ %% Hand-written lambdas do not match this exact shape and remain ordinary BEAM
+ %% closures.
+ compile_exp(Exp = [lambda, Var, Body], Env) when is_atom(Var) -> % (lambda X (+ X 2))
+-  case dynamic_eta_app(Exp) of
++  case dynamic_eta_app(Exp, Env) of
+     {ok, Op, Args} ->
+       compile_runtime_app(Op, [compile_exp(Arg, Env) || Arg <- Args]);
+     no ->
+@@ -267,7 +326,7 @@ compile_exp([Op | Args], Env) when is_atom(Op) -> % (a b c)
+       compile_dynamic_app(erl_syntax:variable(VarName), CArgs);
+     not_found ->
+       %% Case 1.2: Function operator is a global function
+-      case shen_erl_global_stores:get_mfa(Op) of
++      case get_mfa(Op, Env) of
+         {ok, {Mod, Fun, Arity}} ->
+           case is_dynamic_function(Op, Mod) of
+             true -> compile_runtime_app(Op, CArgs);
+@@ -316,18 +375,18 @@ compile_runtime_app(Op, CArgs) ->
+                                     erl_syntax:atom(invoke)),
+   erl_syntax:application(COp, [erl_syntax:atom(Op), erl_syntax:list(CArgs)]).
+ 
+-dynamic_eta_app(Exp) ->
+-  dynamic_eta_app(Exp, []).
++dynamic_eta_app(Exp, Env) ->
++  dynamic_eta_app(Exp, [], Env).
+ 
+-dynamic_eta_app([lambda, Var, Body], Vars) when is_atom(Var) ->
+-  dynamic_eta_app(Body, Vars ++ [Var]);
+-dynamic_eta_app([Op | Args], Vars) when is_atom(Op), Vars =/= [] ->
++dynamic_eta_app([lambda, Var, Body], Vars, Env) when is_atom(Var) ->
++  dynamic_eta_app(Body, Vars ++ [Var], Env);
++dynamic_eta_app([Op | Args], Vars, Env) when is_atom(Op), Vars =/= [] ->
+   PrefixLen = length(Args) - length(Vars),
+   %% PrefixLen = 0 is a lambda-table eta entry.  Keep that closure intact: it
+   %% is deliberately compiled just before a redefinition updates the live MFA.
+   case PrefixLen > 0 andalso lists:nthtail(PrefixLen, Args) =:= Vars of
+     true ->
+-      case shen_erl_global_stores:get_mfa(Op) of
++      case get_mfa(Op, Env) of
+         {ok, {Mod, _Fun, _Arity}} ->
+           case is_dynamic_function(Op, Mod) of
+             true -> {ok, Op, lists:sublist(Args, PrefixLen)};
+@@ -337,9 +396,16 @@ dynamic_eta_app([Op | Args], Vars) when is_atom(Op), Vars =/= [] ->
+       end;
+     false -> no
+   end;
+-dynamic_eta_app(_Exp, _Vars) ->
++dynamic_eta_app(_Exp, _Vars, _Env) ->
+   no.
+ 
++%% Functions defined by the forms being compiled shadow the function store.
++get_mfa(Name, Env) ->
++  case shen_erl_kl_env:local_mfa(Env, Name) of
++    {ok, MFA} -> {ok, MFA};
++    not_found -> shen_erl_global_stores:get_mfa(Name)
++  end.
++
+ %% Helper functions
+ is_unused(Var, Var) ->
+   false;
+diff --git a/src/shen_erl_kl_env.erl b/src/shen_erl_kl_env.erl
+index ef1d431..46d1ba5 100644
+--- a/src/shen_erl_kl_env.erl
++++ b/src/shen_erl_kl_env.erl
+@@ -6,12 +6,18 @@
+ 
+ %% API
+ -export([new/0,
++         new/1,
+          fetch/2,
++         local_mfa/2,
+          store_var/3,
+          new_var/1]).
+ 
+ %% Types
+--record(env, {vars :: orddict:orddict(atom(), atom())}).
++%% funs: functions defined by the forms being compiled, as they will be
++%% registered once the module is loaded.  Consulted before the function store
++%% so that compiling does not have to register them first.
++-record(env, {vars :: orddict:orddict(atom(), atom()),
++              funs = #{} :: #{atom() => mfa()}}).
+ 
+ -opaque env() :: #env{}.
+ -type is_unused() :: boolean().
+@@ -25,7 +31,18 @@
+ 
+ -spec new() -> env().
+ new() ->
+-  #env{vars = orddict:new()}.
++  new(#{}).
++
++-spec new(#{atom() => mfa()}) -> env().
++new(Funs) ->
++  #env{vars = orddict:new(), funs = Funs}.
++
++-spec local_mfa(env(), atom()) -> {ok, mfa()} | not_found.
++local_mfa(#env{funs = Funs}, Name) ->
++  case maps:find(Name, Funs) of
++    {ok, MFA} -> {ok, MFA};
++    error -> not_found
++  end.
+ 
+ -spec fetch(env(), atom()) -> {ok, atom()} | not_found.
+ fetch(#env{vars = Vars}, VarKey) ->
+diff --git a/test/default.spec b/test/default.spec
+index cb1e15a..4a8a456 100644
+--- a/test/default.spec
++++ b/test/default.spec
+@@ -3,4 +3,5 @@
+  [shen_erl_kl_codegen_SUITE,
+   shen_erl_kl_overrides_SUITE,
+   shen_erl_interop_SUITE,
+-  shen_erl_json_SUITE]}.
++  shen_erl_json_SUITE,
++  shen_erl_compiler_api_SUITE]}.
+diff --git a/test/shen_erl_compiler_api_SUITE.erl b/test/shen_erl_compiler_api_SUITE.erl
+new file mode 100644
+index 0000000..40aa628
+--- /dev/null
++++ b/test/shen_erl_compiler_api_SUITE.erl
+@@ -0,0 +1,268 @@
++-module(shen_erl_compiler_api_SUITE).
++
++-export([suite/0,
++         all/0,
++         init_per_testcase/2,
++         end_per_testcase/2,
++         t_forms_without_loading/1,
++         t_forms_binding/1,
++         t_compile_load_call/1,
++         t_redefine_arity/1,
++         t_arity/1,
++         t_non_overridable/1,
++         t_eval_registers_after_load/1,
++         t_parse_round_trip/1,
++         t_parse_errors/1,
++         t_codegen_error/1,
++         t_shen_booted/1]).
++
++-include_lib("common_test/include/ct.hrl").
++
++-define(FUNS_STORE, '_kl_funs_store').
++
++%%%===================================================================
++%%% Common test
++%%%===================================================================
++
++suite() ->
++  [{timetrap, {minutes, 2}}].
++
++all() ->
++  [t_forms_without_loading,
++   t_forms_binding,
++   t_compile_load_call,
++   t_redefine_arity,
++   t_arity,
++   t_non_overridable,
++   t_eval_registers_after_load,
++   t_parse_round_trip,
++   t_parse_errors,
++   t_codegen_error,
++   t_shen_booted].
++
++%% ETS stores are owned by the test case process, so each case creates its
++%% own.  Only t_shen_booted boots the kernel.
++init_per_testcase(Case, Config) ->
++  shen_erl_global_stores:init(),
++  case Case of
++    t_shen_booted ->
++      shen_erl_kl_primitives:set('*stoutput*', standard_io),
++      shen_erl_kl_primitives:set('*stinput*', standard_io),
++      shen_erl_kl_compiler:boot();
++    _ ->
++      ok
++  end,
++  Config.
++
++end_per_testcase(_Case, _Config) ->
++  [begin code:purge(M), code:delete(M), code:purge(M) end
++   || {M, _} <- code:all_loaded(), lists:prefix("_kl_api", atom_to_list(M))],
++  ok.
++
++%%%===================================================================
++%%% Test cases
++%%%===================================================================
++
++%% forms/2 and compile/2 neither load anything nor change the function store.
++t_forms_without_loading(_Config) ->
++  {ok, Kl} = shen_erl_compiler_api:parse_string(
++               "(defun api-nl-f (X) (+ X 1))"
++               "(defun api-nl-g (X) (api-nl-f (api-nl-f X)))"
++               "(api-nl-g 1)"),
++  %% Warm up: the first compile loads the Erlang compiler's own modules.
++  {ok, _} = shen_erl_compiler_api:compile('_kl_api_warmup', Kl),
++  Store = lists:sort(ets:tab2list(?FUNS_STORE)),
++  Loaded = lists:sort([M || {M, _} <- code:all_loaded()]),
++
++  {ok, Forms} = shen_erl_compiler_api:forms('_kl_api_nl', Kl),
++  {ok, Bin} = shen_erl_compiler_api:compile('_kl_api_nl', Kl),
++
++  Store = lists:sort(ets:tab2list(?FUNS_STORE)),
++  Loaded = lists:sort([M || {M, _} <- code:all_loaded()]),
++  false = code:is_loaded('_kl_api_nl'),
++  not_found = shen_erl_compiler_api:lookup('api-nl-f'),
++
++  %% The abstract forms are what compile/2 compiles.
++  [{attribute, _, module, '_kl_api_nl'} | _] = Forms,
++  {ok, '_kl_api_nl', _, _} = compile:forms(Forms, [return_errors, return_warnings]),
++  {ok, {'_kl_api_nl', [{exports, Exports}]}} = beam_lib:chunks(Bin, [exports]),
++  [{'api-nl-f', 1}, {'api-nl-g', 1}, {kl_tle, 0}] =
++    lists:sort([E || E = {N, _} <- Exports, N =/= module_info]).
++
++%% Calls between a module's own defuns resolve to that module: through
++%% runtime dispatch for a _kl_ module, as static remote calls otherwise.
++t_forms_binding(_Config) ->
++  {ok, Kl} = shen_erl_compiler_api:parse_string(
++               "(defun s-f (X) X) (defun s-g (X) (s-f X))"),
++  {ok, Static} = shen_erl_compiler_api:forms(api_static, Kl),
++  true = contains({remote, any, {atom, any, api_static}, {atom, any, 's-f'}}, Static),
++  false = contains({atom, any, invoke}, Static),
++  {ok, Dynamic} = shen_erl_compiler_api:forms('_kl_api_dyn', Kl),
++  true = contains({remote, any, {atom, any, shen_erl_kl_compiler}, {atom, any, invoke}}, Dynamic),
++  false = contains({atom, any, '_kl_api_dyn'}, tl(Dynamic)),
++  not_found = shen_erl_compiler_api:lookup('s-f').
++
++t_compile_load_call(_Config) ->
++  {ok, Kl} = shen_erl_compiler_api:parse_string(
++               "(defun api-add (X Y) (+ X Y))\n"
++               "(defun api-twice (X) (api-add X X))\n"
++               "(defun api-adder (X) (lambda Y (+ X Y)))\n"
++               "(api-twice 21)\n"),
++  {ok, Bin} = shen_erl_compiler_api:compile('_kl_api_m', Kl),
++  not_found = shen_erl_compiler_api:lookup('api-add'),
++  {ok, Registered} = shen_erl_compiler_api:load('_kl_api_m', Bin),
++  [{'api-add', 2}, {'api-adder', 1}, {'api-twice', 1}] = lists:sort(Registered),
++  {ok, {'_kl_api_m', 'api-add', 2}} = shen_erl_compiler_api:lookup('api-add'),
++  10 = shen_erl_compiler_api:call('api-twice', [5]),
++  42 = shen_erl_compiler_api:run_toplevel('_kl_api_m'),
++  %% Fewer arguments than the arity: curried.
++  Inc = shen_erl_compiler_api:call('api-add', [1]),
++  3 = Inc(2),
++  Curried = shen_erl_compiler_api:call('api-add', []),
++  7 = (Curried(3))(4),
++  %% More arguments than the arity: the result is applied to the rest.
++  3 = shen_erl_compiler_api:call('api-adder', [1, 2]),
++  {'EXIT', {{undef, 'api-missing'}, _}} =
++    catch shen_erl_compiler_api:call('api-missing', [1]),
++  %% A module without toplevel expressions returns ok.
++  {ok, Bin2} = shen_erl_compiler_api:compile('_kl_api_m2', [[defun, 'api-id', ['X'], 'X']]),
++  {ok, [{'api-id', 1}]} = shen_erl_compiler_api:load('_kl_api_m2', Bin2),
++  ok = shen_erl_compiler_api:run_toplevel('_kl_api_m2').
++
++%% Redefining a function with another arity: callers compiled earlier see the
++%% new binding through runtime dispatch.
++t_redefine_arity(_Config) ->
++  load_kl('_kl_api_f1', "(defun api-f (X) (* X 10))"),
++  load_kl('_kl_api_user', "(defun api-use (X) (api-f X))"),
++  10 = shen_erl_compiler_api:call('api-use', [1]),
++  {ok, 1} = shen_erl_compiler_api:arity('api-f'),
++
++  load_kl('_kl_api_f2', "(defun api-f (X Y) (+ X Y))"),
++  {ok, 2} = shen_erl_compiler_api:arity('api-f'),
++  {ok, {'_kl_api_f2', 'api-f', 2}} = shen_erl_compiler_api:lookup('api-f'),
++  5 = shen_erl_compiler_api:call('api-f', [2, 3]),
++  Partial = shen_erl_compiler_api:call('api-use', [1]),
++  true = is_function(Partial, 1),
++  3 = Partial(2),
++
++  %% Reloading the same module name replaces its code.
++  load_kl('_kl_api_f2', "(defun api-f () 99)"),
++  {ok, 0} = shen_erl_compiler_api:arity('api-f'),
++  99 = shen_erl_compiler_api:call('api-f', []).
++
++t_arity(_Config) ->
++  {ok, 2} = shen_erl_compiler_api:arity('+'),
++  {ok, 1} = shen_erl_compiler_api:arity(hd),
++  not_found = shen_erl_compiler_api:arity('api-nothing'),
++  not_found = shen_erl_compiler_api:lookup('api-nothing'),
++  load_kl('_kl_api_ar', "(defun api-three (A B C) (cons A (cons B (cons C ()))))"),
++  {ok, 3} = shen_erl_compiler_api:arity('api-three'),
++  [a, b, c] = shen_erl_compiler_api:call('api-three', [a, b, c]).
++
++%% Names bound to the port's non-overridable functions keep their binding.
++t_non_overridable(_Config) ->
++  {ok, Before} = shen_erl_compiler_api:lookup('not'),
++  {ok, Bin} = shen_erl_compiler_api:compile('_kl_api_no',
++                                            [[defun, 'not', ['X'], 'X'],
++                                             [defun, 'api-neg', ['X'], ['not', 'X']]]),
++  {ok, [{'api-neg', 1}]} = shen_erl_compiler_api:load('_kl_api_no', Bin),
++  {ok, Before} = shen_erl_compiler_api:lookup('not'),
++  false = shen_erl_compiler_api:call('api-neg', [true]).
++
++%% eval/1 compiles without registering, then registers after loading; the
++%% result is as before (defun returns its name, and is bound to _kl_<Name>).
++t_eval_registers_after_load(_Config) ->
++  {ok, [Fact]} = shen_erl_compiler_api:parse_string(
++                   "(defun api-fact (N) (if (= N 0) 1 (* N (api-fact (- N 1)))))"),
++  'api-fact' = shen_erl_kl_codegen:eval(Fact),
++  {ok, {'_kl_api-fact', 'api-fact', 1}} = shen_erl_compiler_api:lookup('api-fact'),
++  120 = shen_erl_compiler_api:call('api-fact', [5]),
++  {ok, [Exp]} = shen_erl_compiler_api:parse_string("(api-fact 4)"),
++  24 = shen_erl_kl_codegen:eval(Exp),
++  %% Redefinition with a different arity through eval/1.
++  {ok, [Fact2]} = shen_erl_compiler_api:parse_string("(defun api-fact (A B) (* A B))"),
++  'api-fact' = shen_erl_kl_codegen:eval(Fact2),
++  {ok, 2} = shen_erl_compiler_api:arity('api-fact'),
++  6 = shen_erl_kl_codegen:eval([['api-fact', 2], 3]),
++  code:purge('_kl_api-fact'), code:delete('_kl_api-fact'), code:purge('_kl_api-fact').
++
++%% Parsing and printing KL is a round trip, from text and from a file.
++t_parse_round_trip(Config) ->
++  Source = "(defun api-rt (X) (cons \"s\" (cons -1.5 (cons X ()))))\n"
++           "(api-rt 7)\n"
++           "(let L (lambda Y Y) (L sym))\n",
++  {ok, Kl} = shen_erl_compiler_api:parse_string(Source),
++  [[defun, 'api-rt', ['X'], [cons, {string, "s"}, [cons, -1.5, [cons, 'X', []]]]],
++   ['api-rt', 7],
++   ['let', 'L', [lambda, 'Y', 'Y'], ['L', sym]]] = Kl,
++  {ok, Kl} = shen_erl_compiler_api:parse_string(print_kl(Kl)),
++  {ok, Kl} = shen_erl_compiler_api:parse_string(list_to_binary(Source)),
++  File = filename:join(?config(priv_dir, Config), "api_rt.kl"),
++  ok = file:write_file(File, print_kl(Kl)),
++  {ok, Kl} = shen_erl_compiler_api:parse_file(File),
++  {ok, []} = shen_erl_compiler_api:parse_string(""),
++  %% Text is code points; files are bytes, as the kernel reads them.
++  {ok, [{string, [16#E9]}]} = shen_erl_compiler_api:parse_string(<<"\"", 16#C3, 16#A9, "\"">>),
++  ok = file:write_file(File, <<"\"", 16#C3, 16#A9, "\"">>),
++  {ok, [{string, [16#C3, 16#A9]}]} = shen_erl_compiler_api:parse_file(File),
++  %% The parsed forms compile and run.
++  {ok, Bin} = shen_erl_compiler_api:compile('_kl_api_rt', Kl),
++  {ok, _} = shen_erl_compiler_api:load('_kl_api_rt', Bin),
++  sym = shen_erl_compiler_api:run_toplevel('_kl_api_rt'),
++  [{string, "s"}, -1.5, 7] = shen_erl_compiler_api:call('api-rt', [7]).
++
++t_parse_errors(_Config) ->
++  {error, _} = shen_erl_compiler_api:parse_string("(defun f (X) X"),
++  {error, _} = shen_erl_compiler_api:parse_string(")"),
++  {error, enoent} = shen_erl_compiler_api:parse_file("/nonexistent/shen-erl.kl").
++
++t_codegen_error(_Config) ->
++  {error, {codegen, _}} = shen_erl_compiler_api:forms('_kl_api_bad', [['%%goto-label', nolabel]]),
++  {error, {codegen, _}} = shen_erl_compiler_api:compile('_kl_api_bad', [['%%goto-label', nolabel]]).
++
++%% Against a booted kernel: kernel functions are callable by name, and
++%% update-lambda-table makes an API-loaded function known to Shen's arity.
++t_shen_booted(_Config) ->
++  {ok, _} = shen_erl_compiler_api:arity('shen.initialise'),
++  [3, 2, 1] = shen_erl_compiler_api:call(reverse, [[1, 2, 3]]),
++  load_kl('_kl_api_sh', "(defun api-sh (X Y) (* X Y))"),
++  'api-sh' = shen_erl_compiler_api:call('update-lambda-table', ['api-sh', 2]),
++  2 = shen_erl_kl_compiler:eval("(arity api-sh)"),
++  12 = shen_erl_kl_compiler:eval("((fn api-sh) 3 4)"),
++  [2, 4] = shen_erl_kl_compiler:eval("(map (api-sh 2) [1 2])").
++
++%%%===================================================================
++%%% Helpers
++%%%===================================================================
++
++load_kl(Mod, Source) ->
++  {ok, Kl} = shen_erl_compiler_api:parse_string(Source),
++  {ok, Bin} = shen_erl_compiler_api:compile(Mod, Kl),
++  {ok, Registered} = shen_erl_compiler_api:load(Mod, Bin),
++  Registered.
++
++print_kl(Forms) when is_list(Forms) ->
++  lists:join("\n", [print_exp(F) || F <- Forms]).
++
++print_exp([]) -> "()";
++print_exp(L) when is_list(L) -> ["(", lists:join(" ", [print_exp(E) || E <- L]), ")"];
++print_exp({string, S}) -> [$", S, $"];
++print_exp(A) when is_atom(A) -> atom_to_list(A);
++print_exp(N) when is_integer(N) -> integer_to_list(N);
++print_exp(F) when is_float(F) -> float_to_list(F, [short]).
++
++%% Whether Pattern occurs in Term; the atom any matches anything.
++contains(Pattern, Term) ->
++  match(Pattern, Term) orelse
++    case Term of
++      _ when is_tuple(Term) -> lists:any(fun (T) -> contains(Pattern, T) end, tuple_to_list(Term));
++      _ when is_list(Term) -> lists:any(fun (T) -> contains(Pattern, T) end, Term);
++      _ -> false
++    end.
++
++match(any, _) -> true;
++match(P, T) when is_tuple(P), is_tuple(T), tuple_size(P) =:= tuple_size(T) ->
++  lists:all(fun ({A, B}) -> match(A, B) end,
++            lists:zip(tuple_to_list(P), tuple_to_list(T)));
++match(P, P) -> true;
++match(_, _) -> false.
+-- 
+2.43.0
+

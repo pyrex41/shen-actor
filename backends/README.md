@@ -3,12 +3,19 @@
 Lowering checked actor IR into executable OTP modules, and the backend
 investigation (PRD section 17).
 
-- `erlang/`: the existing shen-erl Erlang-forms path, used as-is through the
-  pinned dependency; the actor generator targets it first.
-- `lfe/`: the KLambda-to-LFE spike. Reuses shen-erl's runtime primitives,
-  must compile the unmodified pinned kernel, support dynamic evaluation and
-  redefinition, and emit one protocol actor. LFE and OTP versions are pinned
-  in the flake.
+Decision: [ADR 0003](../docs/decisions/0003-backend.md) keeps the
+existing shen-erl Erlang-forms emitter, used as-is through the pinned
+dependency. The rest of this directory is the evidence for it:
+
+- `lfe/`: the KLambda-to-LFE spike. `shen_kl_lfe.erl` is the emitter,
+  `shim/` gives it shen-erl's `shen_erl_kl_codegen` API, `build.sh` builds
+  a candidate copy of the pinned tree (`deps/shen-erl-lfe`) with the kernel
+  recompiled through it, `measure.sh` produces the ADR's measurements.
+- `skeleton/`: a hand-written reservation IR lowered through either
+  emitter to a running gen_server (`tests/spike/skeleton_SUITE.erl`).
+
+`make spike` builds the candidate, runs the corpus on it and the skeleton
+on both emitters; `make spike-kernel` runs the full kernel suite on it.
 
 Decision rule: choose LFE if it preserves compatibility and materially
 simplifies the compiler and actor generation without an unacceptable measured
