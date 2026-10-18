@@ -1,0 +1,228 @@
+From bdfc6e07858ab54f98e40390c6c95a0e95bdc4e7 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Sun, 18 Oct 2026 00:54:34 +0000
+Subject: [PATCH] Back absvectors and dicts with unnamed ETS tables
+
+dict_new/0 created a named table DICT<n> per absvector, tuple and
+dictionary, building the name with list_to_atom.  Every allocation
+therefore leaked one atom for the life of the node (a few million
+allocations exhaust the atom table), and it bumped the shared variable
+counter, a protected table only the booting process may write, so no
+other process could allocate a vector at all.
+
+dict_new/0 now returns ets:new(dict, [set, protected]): an unnamed
+table identified by its tid.  No atom is created and the counter table
+is not touched.  The value shapes are unchanged, {vector, Len, Tab} and
+{dict, Tab}, but Tab is now a reference instead of an atom.
+
+Protection stays protected, as before (named tables were created with
+the default): the allocating process writes, any process reads.  Public
+was not chosen because it would let any process mutate another's
+vectors; that is a semantic change that deserves its own decision.
+
+Code that relied on Tab being an atom:
+- shen_erl_interop:to_shen/1 guarded the boxed vector/dict pass-through
+  with is_atom(Tab); it now uses is_reference(Tab).  An Erlang tuple
+  {vector, 3, foo} is now converted like any other tuple.
+- The dict() type is ets:tid().
+Equality ('=' / vector_equal) compares tables by =:= and then element
+by element, and str/1 prints the table with ~p; both work unchanged
+with tids (str now shows "VECTOR: #Ref<...>[N]").
+
+Tests: the interop suite's to_shen case built {vector, 3, tab} with an
+atom; it now uses a real table and checks that the atom form is no
+longer treated as a boxed vector.  New overrides-suite cases check
+that 1000 each of absvectors, tuples and dicts create exactly 0 atoms
+(and 3000 tables), that vector equality and printing still work, and
+that a non-owner process can allocate, can read another process's
+vector, and cannot write to it.
+
+Measured with a resource probe over 1000 iterations (atoms created):
+absvector 1000 -> 0, (shen.dict 8) 2000 -> 1000 (the remainder is the
+per-evaluation module), redefine 5799 -> 1005, define distinct
+functions 10800 -> 6000.
+
+Remaining limit: tables are still not garbage collected.  An unnamed
+table, like the named one before it, lives until its owner process
+exits or it is deleted explicitly, and nothing deletes it; a long-lived
+process that keeps allocating vectors still grows its table count and
+memory.  This change removes the atom leak only.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01V3S3SEmxSj7HnbJJmxMhCJ
+---
+ src/shen_erl_global_stores.erl       | 11 ++--
+ src/shen_erl_interop.erl             |  4 +-
+ test/shen_erl_interop_SUITE.erl      |  8 ++-
+ test/shen_erl_kl_overrides_SUITE.erl | 78 +++++++++++++++++++++++++++-
+ 4 files changed, 90 insertions(+), 11 deletions(-)
+
+diff --git a/src/shen_erl_global_stores.erl b/src/shen_erl_global_stores.erl
+index 7fd36d8..059cad1 100644
+--- a/src/shen_erl_global_stores.erl
++++ b/src/shen_erl_global_stores.erl
+@@ -38,7 +38,7 @@
+                        shen_erl_kl_json]).
+ -define(PORT_KL_NON_OVERRIDABLE_MODS, [shen_erl_kl_overrides]).
+ 
+--opaque dict() :: atom().
++-opaque dict() :: ets:tid().
+ 
+ %%%===================================================================
+ %%% API
+@@ -90,12 +90,13 @@ get_varname() ->
+   ets:insert(?VARIABLE_COUNTER_STORE_NAME, {?VARIABLE_COUNTER_KEY, Counter + 1}),
+   Counter.
+ 
++%% Backing store for absvectors and dictionaries: an unnamed table, so
++%% allocation creates no atom and does not touch the shared counter table.
++%% Protected, as before: the allocating process writes, any process reads.
++%% The table lives until its owner exits; nothing deletes it earlier.
+ -spec dict_new() -> dict().
+ dict_new() ->
+-  NewCounter = get_varname(),
+-  DictName = list_to_atom("DICT" ++ integer_to_list(NewCounter)),
+-  ets:new(DictName, [set, named_table]),
+-  DictName.
++  ets:new(dict, [set, protected]).
+ 
+ -spec dict_count(dict()) -> non_neg_integer().
+ dict_count(Dict) ->
+diff --git a/src/shen_erl_interop.erl b/src/shen_erl_interop.erl
+index c0852ad..a02037c 100644
+--- a/src/shen_erl_interop.erl
++++ b/src/shen_erl_interop.erl
+@@ -51,9 +51,9 @@ to_shen([H | T]) ->
+   [to_shen(H) | to_shen(T)];
+ to_shen(Boxed = {string, Chars}) when is_list(Chars) ->
+   Boxed;
+-to_shen(Boxed = {vector, Len, Tab}) when is_integer(Len), is_atom(Tab) ->
++to_shen(Boxed = {vector, Len, Tab}) when is_integer(Len), is_reference(Tab) ->
+   Boxed;
+-to_shen(Boxed = {dict, Tab}) when is_atom(Tab) ->
++to_shen(Boxed = {dict, Tab}) when is_reference(Tab) ->
+   Boxed;
+ to_shen(Tuple) when is_tuple(Tuple) ->
+   [to_shen(E) || E <- tuple_to_list(Tuple)];
+diff --git a/test/shen_erl_interop_SUITE.erl b/test/shen_erl_interop_SUITE.erl
+index b91cc6f..840cf93 100644
+--- a/test/shen_erl_interop_SUITE.erl
++++ b/test/shen_erl_interop_SUITE.erl
+@@ -89,8 +89,12 @@ t_to_shen(_Config) ->
+   [255, 0] = shen_erl_interop:to_shen(<<255, 0>>),
+   %% Shen's own boxed values survive untouched.
+   {string, "s"} = shen_erl_interop:to_shen({string, "s"}),
+-  {vector, 3, tab} = shen_erl_interop:to_shen({vector, 3, tab}),
+-  {dict, tab} = shen_erl_interop:to_shen({dict, tab}),
++  %% Absvectors and dicts hold an unnamed ETS table id.
++  Tab = ets:new(t_to_shen, [set]),
++  {vector, 3, Tab} = shen_erl_interop:to_shen({vector, 3, Tab}),
++  {dict, Tab} = shen_erl_interop:to_shen({dict, Tab}),
++  %% A tuple that merely looks like one is converted like any other tuple.
++  [vector, 3, tab] = shen_erl_interop:to_shen({vector, 3, tab}),
+   Map = #{a => 1},
+   Map = shen_erl_interop:to_shen(Map),
+   Pid = self(),
+diff --git a/test/shen_erl_kl_overrides_SUITE.erl b/test/shen_erl_kl_overrides_SUITE.erl
+index d69b663..38e40af 100644
+--- a/test/shen_erl_kl_overrides_SUITE.erl
++++ b/test/shen_erl_kl_overrides_SUITE.erl
+@@ -10,7 +10,10 @@
+          t_dict_missing_key/1,
+          t_cd_empty_string/1,
+          t_dict_fold/1,
+-         t_numeric_equality/1]).
++         t_numeric_equality/1,
++         t_vector_alloc_no_atoms/1,
++         t_vector_equality_and_str/1,
++         t_vector_tables_across_processes/1]).
+ 
+ -include_lib("common_test/include/ct.hrl").
+ 
+@@ -24,7 +27,10 @@ groups() ->
+     [t_dict_missing_key,
+      t_cd_empty_string,
+      t_dict_fold,
+-     t_numeric_equality]}].
++     t_numeric_equality,
++     t_vector_alloc_no_atoms,
++     t_vector_equality_and_str,
++     t_vector_tables_across_processes]}].
+ 
+ suite() ->
+   [{timetrap, {minutes, 1}}].
+@@ -91,3 +97,71 @@ t_numeric_equality(_Config) ->
+   true = H >= 1,
+   true = shen_erl_kl_overrides:'integer?'(4.0),
+   false = shen_erl_kl_overrides:'integer?'(4.5).
++
++%% Absvectors, tuples and dictionaries are backed by unnamed ETS tables:
++%% allocating them must not create atoms (named tables used to leak one
++%% DICT<n> atom per allocation and exhaust the atom table).
++t_vector_alloc_no_atoms(_Config) ->
++  %% Warm up so module loading does not count against the measurement.
++  _ = shen_erl_kl_primitives:absvector(4),
++  _ = shen_erl_kl_overrides:'@p'(a, b),
++  _ = shen_erl_kl_overrides:'shen.dict'(8),
++  Atoms0 = erlang:system_info(atom_count),
++  Tabs0 = length(ets:all()),
++  Vecs = [shen_erl_kl_primitives:absvector(4) || _ <- lists:seq(1, 1000)],
++  Tuples = [shen_erl_kl_overrides:'@p'(I, I) || I <- lists:seq(1, 1000)],
++  Dicts = [shen_erl_kl_overrides:'shen.dict'(8) || _ <- lists:seq(1, 1000)],
++  0 = erlang:system_info(atom_count) - Atoms0,
++  3000 = length(ets:all()) - Tabs0,
++  [true = is_reference(Tab) || {vector, 4, Tab} <- Vecs],
++  [true = is_reference(Tab) || {dict, Tab} <- Dicts],
++  3000 = length(Vecs) + length(Tuples) + length(Dicts).
++
++t_vector_equality_and_str(_Config) ->
++  V1 = make_vector([1, {string, "x"}, [a, b]]),
++  V2 = make_vector([1.0, {string, "x"}, [a, b]]),
++  V3 = make_vector([1, {string, "y"}, [a, b]]),
++  true = shen_erl_kl_primitives:'='(V1, V1),
++  true = shen_erl_kl_primitives:'='(V1, V2),
++  false = shen_erl_kl_primitives:'='(V1, V3),
++  false = shen_erl_kl_primitives:'='(V1, make_vector([1, {string, "x"}])),
++  %% Unset slots compare equal to unset slots only.
++  true = shen_erl_kl_primitives:'='(shen_erl_kl_primitives:absvector(2),
++                                    shen_erl_kl_primitives:absvector(2)),
++  false = shen_erl_kl_primitives:'='(shen_erl_kl_primitives:absvector(1),
++                                     make_vector([0])),
++  true = shen_erl_kl_primitives:'='(shen_erl_kl_overrides:'@p'(1, 2),
++                                    shen_erl_kl_overrides:'@p'(1, 2)),
++  {string, "VECTOR: #Ref<" ++ Rest} = shen_erl_kl_primitives:str(V1),
++  "]3[" ++ _ = lists:reverse(Rest),
++  {string, "DICTIONARY: #Ref<" ++ _} =
++    shen_erl_kl_primitives:str(shen_erl_kl_overrides:'shen.dict'(8)),
++  %% Boxed values still pass through interop untouched.
++  V1 = shen_erl_interop:to_shen(V1),
++  D = shen_erl_kl_overrides:'shen.dict'(8),
++  D = shen_erl_interop:to_shen(D).
++
++%% Any process can allocate (allocation no longer bumps the shared counter
++%% table, which only its owner may write).  Tables stay protected: the
++%% allocating process writes, other processes read.
++t_vector_tables_across_processes(_Config) ->
++  Self = self(),
++  Pid = spawn_link(fun() ->
++                       V = make_vector([a, b]),
++                       Self ! {vector, V},
++                       receive done -> ok end
++                   end),
++  V = receive {vector, Vec} -> Vec after 5000 -> ct:fail(no_vector) end,
++  a = shen_erl_kl_primitives:'<-address'(V, 0),
++  b = shen_erl_kl_primitives:'<-address'(V, 1),
++  {'EXIT', {badarg, _}} = (catch shen_erl_kl_primitives:'address->'(V, 0, z)),
++  {vector, 2, Tab} = V,
++  Pid = ets:info(Tab, owner),
++  protected = ets:info(Tab, protection),
++  Pid ! done,
++  ok.
++
++make_vector(Elems) ->
++  V = shen_erl_kl_primitives:absvector(length(Elems)),
++  lists:foldl(fun({I, E}, Acc) -> shen_erl_kl_primitives:'address->'(Acc, I, E) end,
++              V, lists:zip(lists:seq(0, length(Elems) - 1), Elems)).
+-- 
+2.43.0
+
