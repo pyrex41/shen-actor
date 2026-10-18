@@ -78,6 +78,9 @@ SPIKE_EBIN := tests/logs/spike-ebin
 
 .PHONY: spike-build
 spike-build: shen-erl
+	@# The kernel's tests are extracted by shen-erl's own rule, which only its
+	@# shen-tests target triggers; the candidate copy needs them too.
+	$(MAKE) -C $(SHEN_ERL_DIR) test/shen
 	DEST=$(BASE_DIR)/$(LFE_TREE) sh backends/lfe/build.sh
 
 .PHONY: spike
