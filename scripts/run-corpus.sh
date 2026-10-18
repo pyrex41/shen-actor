@@ -6,13 +6,14 @@
 # exits 0 and its standard output equals NAME.expected, after dropping the
 # "run time: N secs" lines load prints (wall-clock, so not reproducible).
 #
-#   SHEN   the launcher to test (default: deps/shen-erl/bin/shen-erl).  M1
-#          points this at each backend candidate in turn.
+#   SHEN    the launcher to test (default: deps/shen-erl/bin/shen-erl).  M1
+#           points this at each backend candidate in turn.
+#   CORPUS  the directory of cases (default: tests/corpus).
 set -u
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 SHEN=${SHEN:-$ROOT/deps/shen-erl/bin/shen-erl}
-CORPUS=$ROOT/tests/corpus
+CORPUS=${CORPUS:-$ROOT/tests/corpus}
 OUT=$(mktemp -d)
 trap 'rm -rf "$OUT"' EXIT
 
@@ -34,5 +35,5 @@ for src in "$CORPUS"/*.shen; do
   fi
 done
 
-echo "corpus: $pass passed, $fail failed"
+echo "$(basename "$CORPUS"): $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

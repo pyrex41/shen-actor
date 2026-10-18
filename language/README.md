@@ -15,4 +15,9 @@ shen-erl.
 - Diagnostics: source span, protocol, role, phase, operation, failed rule, and
   a repair where available (PRD section 20).
 
+- `read.shen`: `actor.read-file`, the unprocessed reader every frontend
+  stage uses (ADR 0002; `read-file` macroexpands and is never used).
+- `cli.shen`: the `shen-actor` command line, run by `bin/shen-actor`;
+  every subcommand is a stub until its milestone.
+
 Milestones: grammar freeze in M0, elaborator in M2, checker in M3.

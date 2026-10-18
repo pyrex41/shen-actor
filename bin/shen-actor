@@ -1,0 +1,12 @@
+#!/bin/sh
+# The actor command line: shen-erl's launcher running language/cli.shen with
+# this repository's ebin on the code path (ERL_FLAGS is read by erl itself).
+# Build first with `make`.
+set -eu
+
+ROOT=$(cd "$(dirname "$0")/.." && pwd)
+SHEN_ERL_ROOTDIR=${SHEN_ERL_ROOTDIR:-$ROOT/deps/shen-erl}
+export SHEN_ERL_ROOTDIR
+ERL_FLAGS="-pa $ROOT/ebin ${ERL_FLAGS:-}"
+export ERL_FLAGS
+exec "$SHEN_ERL_ROOTDIR/bin/shen-erl" script "$ROOT/language/cli.shen" "$@"
