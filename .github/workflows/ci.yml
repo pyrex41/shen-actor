@@ -26,7 +26,7 @@ jobs:
       - name: make examples
         run: nix develop --command make examples
       - name: shen-actor stub
-        run: nix develop --command sh -c 'if bin/shen-actor check x 2>err; then exit 1; fi; grep -q "shen-actor check: not implemented" err'
+        run: nix develop --command sh scripts/check-cli-stub.sh
       - name: make ct
         run: nix develop --command make ct
       - name: Upload test logs
