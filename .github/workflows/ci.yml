@@ -1,0 +1,34 @@
+# The compatibility gate (plan section 2): the pinned shen-erl's kernel suite
+# and Common Test suites unmodified, this repository's suites, and pin
+# agreement between shen-erl.rev and flake.lock.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  baseline:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v31
+      - name: Pins agree
+        run: sh scripts/check-pins.sh
+      - name: Toolchain
+        run: nix develop --command erl -noshell -eval 'io:format("OTP ~s, erts ~s~n", [erlang:system_info(otp_release), erlang:system_info(version)]), halt().'
+      - name: make baseline
+        run: nix develop --command make baseline
+      - name: make ct
+        run: nix develop --command make ct
+      - name: Upload test logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-logs
+          path: |
+            tests/logs
+            deps/shen-erl/test/logs
+          if-no-files-found: ignore
