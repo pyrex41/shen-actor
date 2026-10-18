@@ -368,7 +368,7 @@ In order, each a small reviewable change:
    `tests/BASELINE.md` with the numbers from section 9. (Done.)
 3. Ownership probe suite asserting today's behavior. (Done.)
 4. Semantic regression corpus and its runner. (Done.)
-5. Resource probes (eval and vector growth) with numbers.
+5. Resource probes (eval and vector growth) with numbers. (Done.)
 6. ADR 0002 grammar draft with parsed reservation examples and the failure
    taxonomy; `bin/shen-actor` stub.
 7. Upstream PRs to shen-erl for U3 (compiler interface) and U1 (unnamed

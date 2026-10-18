@@ -60,3 +60,37 @@ definition or allocate need the owner. This narrows U2 (the environment owner
 must serialize definitions and allocation, not every evaluation) and makes U4
 (unpurged anonymous modules) reachable from every process, not just the
 owner.
+
+## Resource probes
+
+`tests/probes/resource_probes.erl`, run with `make resource-probes N=...`.
+One process owns the stores and boots the kernel, then performs each
+operation N times; the row is the growth across the N operations, measured
+after a garbage collection. Launcher flags (`+P 524288 +t 4194304`).
+Recorded 17 October 2026, same environment as above, N = 1000 (N = 100
+gives the same per-operation figures).
+
+| Probe | Modules | Atoms | ETS tables | Memory (KB) | Code (KB) | µs/op |
+| --- | --- | --- | --- | --- | --- | --- |
+| `eval-kl` of an expression | 1000 | 1313 | 0 | 3118 | 2173 | 1374 |
+| Shen `eval` of an expression | 1000 | 1000 | 0 | 2678 | 2080 | 1641 |
+| Redefine one function | 2 | 5799 | 4000 | 11651 | 6 | 3032 |
+| Define distinct functions | 2000 | 10800 | 4000 | 19648 | 5105 | 4223 |
+| `absvector` | 0 | 1000 | 1000 | 2537 | 0 | 3 |
+| `shen.dict` (through `eval`) | 1000 | 2000 | 1000 | 5560 | 2025 | 2284 |
+
+Per operation, and never reclaimed while the owner lives:
+
+- Every evaluation of a non-defun form loads one new module (about 2 KB of
+  code) and creates at least one atom (its random name). Nothing purges
+  them. A service that evaluates per request grows without bound (U4).
+- Every vector and dictionary creates one atom and one named ETS table.
+  The table is not freed when the value becomes garbage, and the atom never
+  is. At the launcher's atom limit of 4,194,304, roughly four million
+  allocations end the node (U1).
+- A function definition creates four ETS tables and about six atoms, even
+  when it replaces an existing definition (code is replaced, so code memory
+  stays flat). Repeated redefinition still leaks tables and atoms.
+
+These are the numbers U1 and U4 are reviewed against: after either lands,
+re-run the probes on the bumped pin and replace the affected rows.
