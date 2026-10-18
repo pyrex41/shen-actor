@@ -1,6 +1,6 @@
 # The compatibility gate (plan section 2): the pinned shen-erl's kernel suite
-# and Common Test suites unmodified, this repository's suites, and pin
-# agreement between shen-erl.rev and flake.lock.
+# and Common Test suites unmodified, the semantic corpus, this repository's
+# suites, and pin agreement between shen-erl.rev and flake.lock.
 name: ci
 
 on:
@@ -21,6 +21,8 @@ jobs:
         run: nix develop --command erl -noshell -eval 'io:format("OTP ~s, erts ~s~n", [erlang:system_info(otp_release), erlang:system_info(version)]), halt().'
       - name: make baseline
         run: nix develop --command make baseline
+      - name: make corpus
+        run: nix develop --command make corpus
       - name: make ct
         run: nix develop --command make ct
       - name: Upload test logs

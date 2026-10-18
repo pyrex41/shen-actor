@@ -367,7 +367,7 @@ In order, each a small reviewable change:
 2. CI workflow running `make baseline`, `make ct`, `check-pins.sh`;
    `tests/BASELINE.md` with the numbers from section 9. (Done.)
 3. Ownership probe suite asserting today's behavior. (Done.)
-4. Semantic regression corpus and its runner.
+4. Semantic regression corpus and its runner. (Done.)
 5. Resource probes (eval and vector growth) with numbers.
 6. ADR 0002 grammar draft with parsed reservation examples and the failure
    taxonomy; `bin/shen-actor` stub.

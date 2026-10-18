@@ -1,0 +1,10 @@
+\\ Applying values that are computed at run time.
+(define pick add -> (fn +) sub -> (fn -))
+(output "~A~%" ((pick add) 7 2))
+(output "~A~%" ((pick sub) 7 2))
+(define twice F X -> (F (F X)))
+(output "~A~%" (twice (+ 3) 1))
+(output "~A~%" (twice (twice (* 2)) 1))
+(define compose F G -> (/. X (F (G X))))
+(output "~A~%" ((compose (+ 1) (* 10)) 4))
+(output "~A~%" (map (/. F (F 2)) [(+ 1) (* 3) (fn number?)]))
